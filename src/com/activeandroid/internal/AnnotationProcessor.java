@@ -16,6 +16,7 @@ import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.DeclaredType;
+import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.tools.Diagnostic.Kind;
 import javax.tools.JavaFileObject;
@@ -222,7 +223,7 @@ public final class AnnotationProcessor extends AbstractProcessor {
 			boolean notPrimitiveType = typeMirror instanceof DeclaredType;
 			String type = typeMirror.toString() + ".class";
 			String getValue = MODEL + "." + column.getSimpleName();
-			
+
 			if (notPrimitiveType) {
 				stringBuilder.append("    if (ModelHelper.isSerializable(" + type + ")) {\n");
 				stringBuilder.append("      ModelHelper.setSerializable(" + CONTENT_VALUES + ", " + type + ", " + getValue + ", \"" + fieldName + "\");\n");  
@@ -272,6 +273,9 @@ public final class AnnotationProcessor extends AbstractProcessor {
 	private boolean isTypeOf(TypeMirror typeMirror, Class<?> type) {
 		if (type.getName().equals(typeMirror.toString()))
 			return true;
+
+		if ((typeMirror.getKind() == TypeKind.ARRAY) && type.isArray())
+			return typeMirror.toString().equals(type.getComponentType() + "[]");
 
 		if (typeMirror instanceof DeclaredType == false)
 			return false;
