@@ -397,7 +397,7 @@ public final class SQLiteUtils {
 					entities.add((T) entity);
 
 					// add to cache
-					if (entity.getId() != null)
+					if (useCache && entity.getId() != null)
 						Cache.addEntity(entity);
 				}
 				while (cursor.moveToNext());
