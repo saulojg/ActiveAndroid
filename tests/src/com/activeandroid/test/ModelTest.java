@@ -232,6 +232,16 @@ public class ModelTest extends ActiveAndroidTestCase {
 
 	}
 
+	public void testNonCachedReads(){
+		MockModel cached = new MockModel();
+		cached.save();
+
+		MockModel notCached = new Select().from(MockModel.class).where("id = ?", cached.getId())
+				.setUseCache(false).executeSingle();
+
+		assertTrue(cached!=notCached);
+	}
+
 	/**
 	 * Mock model as we need 2 different model classes.
 	 */
