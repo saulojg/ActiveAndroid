@@ -40,7 +40,7 @@ public final class From implements Sqlable {
 	private String mOrderBy;
 	private String mLimit;
 	private String mOffset;
-    private boolean useCache = true;
+    private boolean useCache = false;
 
 	private List<Object> mArguments;
 
