@@ -81,8 +81,6 @@ public final class Cache {
 		
 		initializeModelFillers();
 
-		openDatabase();
-
 		sIsInitialized = true;
 
 		Log.v("ActiveAndroid initialized successfully.");
