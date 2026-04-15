@@ -121,6 +121,33 @@ public abstract class Model {
 	}
 	// Model population
 
+	/**
+	 * Copies all {@code @Column} field values (including the record ID) from
+	 * the given source model onto this instance.  Both instances must be of
+	 * the same concrete type.
+	 *
+	 * @param source the model to copy column values from
+	 * @throws IllegalArgumentException if source is null or of a different type
+	 */
+	public final void loadColumnsFrom(Model source) {
+		if (source == null)
+			throw new IllegalArgumentException("source must not be null");
+		if (source.getClass() != this.getClass())
+			throw new IllegalArgumentException(
+					"source must be the same type; expected "
+							+ this.getClass().getName() + " but got "
+							+ source.getClass().getName());
+		for (Field field : mTableInfo.getFields()) {
+			field.setAccessible(true);
+			try {
+				field.set(this, field.get(source));
+			} catch (IllegalAccessException e) {
+				throw new RuntimeException(
+						"Failed to copy field: " + field.getName(), e);
+			}
+		}
+	}
+
 	public final void loadFromCursor(Cursor cursor) {
 		ModelFiller filler = Cache.getFiller(mTableInfo.getType());
 		if (filler != null) {			
