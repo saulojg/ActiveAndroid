@@ -205,8 +205,22 @@ final class ModelInfo {
 	}
 
 	private void scanForModelClasses(File path, String packageName, ClassLoader classLoader) {
-		if (path.isDirectory()) {
-			for (File file : path.listFiles()) {
+		// Not everything reaching this method is a file. scanForModel() fills its list from
+		// two sources: under Robolectric, real directories of .class files, and on a device,
+		// the dex entries, which are class names. isDirectory() is what tells them apart, and
+		// it gets it wrong when a class name also names a directory -- the process runs with
+		// "/" as its working directory, so an obfuscated class called "d" resolves to /d, on
+		// Android a symlink to /sys/kernel/debug. That is a real directory the app may not
+		// list, so listFiles() returns null, and the unguarded for-each threw an NPE out of
+		// ContentProvider.onCreate, before Application.onCreate, killing the app on every
+		// cold start.
+		//
+		// A null here therefore means "this was never a directory we can walk", so fall
+		// through and read it as a class name, which on a device is what it always was.
+		File[] files = path.isDirectory() ? path.listFiles() : null;
+
+		if (files != null) {
+			for (File file : files) {
 				scanForModelClasses(file, packageName, classLoader);
 			}
 		}
