@@ -67,6 +67,19 @@ public abstract class Model {
 		return mId;
 	}
 
+	/**
+	 * Restores or clears this instance's id, e.g. after unparceling or a rolled-back save. Not
+	 * for assigning new ids. Drops the cache entry under the old id; does not cache under the new
+	 * one. Changes {@link #equals}/{@link #hashCode}, so remove the instance from hash-based
+	 * collections first.
+	 */
+	public final void setIdForRestore(Long id) {
+		if (mId != null && !mId.equals(id) && Cache.isInitialized()
+				&& Cache.getEntity(getClass(), mId) == this)
+			Cache.removeEntity(this);
+		mId = id;
+	}
+
 	public final void delete() {
 		Cache.openDatabase().delete(mTableInfo.getTableName(), idName+"=?", new String[] { getId().toString() });
 		Cache.removeEntity(this);
