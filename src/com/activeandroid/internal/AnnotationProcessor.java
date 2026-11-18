@@ -2,10 +2,17 @@ package com.activeandroid.internal;
 
 import java.io.IOException;
 import java.io.Writer;
+import java.nio.charset.Charset;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.RoundEnvironment;
@@ -19,10 +26,14 @@ import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.tools.Diagnostic.Kind;
+import javax.tools.FileObject;
 import javax.tools.JavaFileObject;
+import javax.tools.StandardLocation;
 
 import com.activeandroid.Model;
+import com.activeandroid.ModelRegistry;
 import com.activeandroid.annotation.Column;
+import com.activeandroid.serializer.TypeSerializer;
 
 public final class AnnotationProcessor extends AbstractProcessor {
 
@@ -31,22 +42,60 @@ public final class AnnotationProcessor extends AbstractProcessor {
 	private static final String CONTENT_VALUES = "contentValues";
 	private static final String COLUMNS_ORDERED = "columnsOrdered";
 
+	private static final String REGISTRY_PACKAGE = "com.activeandroid.registry";
+
+	/** {@code -Aactiveandroid.registry=false} disables {@link ModelRegistry} generation. */
+	private static final String OPTION_REGISTRY = "activeandroid.registry";
+
+	/** Lets a {@code dynamic} processor declare itself aggregating to Gradle. */
+	private static final String GRADLE_AGGREGATING = "org.gradle.annotation.processing.aggregating";
+
 	private RoundEnvironment env;
 
+	/** Qualified names already written to a registry. */
+	private final Set<String> registered = new HashSet<String>();
+
+	/** Registry classes written so far, for the services file. */
+	private final List<String> registryNames = new ArrayList<String>();
+
+	private final List<Element> registryOrigins = new ArrayList<Element>();
+
+	/** Returns false: claiming {@code "*"} would hide annotations from later processors. */
 	@Override
 	public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment env) {
 		this.env = env;
-		if (annotations.size() > 0) {
-			parseColumns();
+		parseColumns();
+		if (isRegistryEnabled()) {
+			// Every round: other processors may generate models
+			if (!env.processingOver())
+				writeRegistry();
+			else
+				writeRegistryServices();
 		}
-		return true;
+		return false;
 	}
 
+	/**
+	 * Aggregating only with the registry off. An incremental aggregating run misses unannotated
+	 * models, so with the registry on Gradle recompiles the module in full.
+	 */
+	@Override
+	public Set<String> getSupportedOptions() {
+		Set<String> options = new HashSet<String>();
+		options.add(OPTION_REGISTRY);
+		if (processingEnv != null && !isRegistryEnabled())
+			options.add(GRADLE_AGGREGATING);
+		return options;
+	}
+
+	private boolean isRegistryEnabled() {
+		return !"false".equalsIgnoreCase(processingEnv.getOptions().get(OPTION_REGISTRY));
+	}
+
+	/** Everything: a model may inherit all its annotations from a superclass. */
 	@Override
 	public Set<String> getSupportedAnnotationTypes() {
-		Set<String> supportedTypes = new HashSet<String>();
-		supportedTypes.add(Column.class.getCanonicalName());
-		return supportedTypes;
+		return Collections.singleton("*");
 	}
 
 	@Override
@@ -325,6 +374,176 @@ public final class AnnotationProcessor extends AbstractProcessor {
 
 		return true;
 	}
+
+	// region registry
+
+	/**
+	 * Writes a {@link ModelRegistry} for this round's new concrete models and serializers, if
+	 * any. Classes not reachable by a class literal are loaded by binary name, which R8 still
+	 * tracks.
+	 */
+	private void writeRegistry() {
+		TypeMirror model = erasure(Model.class);
+		TypeMirror serializer = erasure(TypeSerializer.class);
+
+		// qualified name -> binary name, or null if a class literal works
+		Map<String, String> models = new TreeMap<String, String>();
+		Map<String, String> serializers = new TreeMap<String, String>();
+		List<Element> origins = new ArrayList<Element>();
+		for (TypeElement type : allTypes()) {
+			if (type.getKind() != ElementKind.CLASS || type.getModifiers().contains(Modifier.ABSTRACT))
+				continue;
+			String name = type.getQualifiedName().toString();
+			if (registered.contains(name))
+				continue;
+			TypeMirror erased = processingEnv.getTypeUtils().erasure(type.asType());
+			boolean isModel = processingEnv.getTypeUtils().isSubtype(erased, model);
+			boolean isSerializer = !isModel && processingEnv.getTypeUtils().isSubtype(erased, serializer);
+			if (!isModel && !isSerializer)
+				continue;
+			String binaryName = isReachable(type) ? null
+					: processingEnv.getElementUtils().getBinaryName(type).toString();
+			(isModel ? models : serializers).put(name, binaryName);
+			origins.add(type);
+		}
+
+		if (models.isEmpty() && serializers.isEmpty())
+			return;
+
+		String simpleName = "ModelRegistry_" + contentHash(models.keySet(), serializers.keySet());
+		String qualifiedName = REGISTRY_PACKAGE + "." + simpleName;
+
+		StringBuilder source = new StringBuilder();
+		source.append("//Generated by ActiveAndroid. Do not modify\n");
+		source.append("package ").append(REGISTRY_PACKAGE).append(";\n\n");
+		source.append("import java.util.ArrayList;\n");
+		source.append("import java.util.List;\n\n");
+		source.append("@SuppressWarnings({\"unchecked\", \"rawtypes\"})\n");
+		source.append("public final class ").append(simpleName).append(" implements com.activeandroid.ModelRegistry {\n\n");
+		source.append("  public ").append(simpleName).append("() {\n  }\n\n");
+		source.append("  @Override\n");
+		source.append("  public List<Class<? extends com.activeandroid.Model>> getModelClasses() {\n");
+		appendClassList(source, models);
+		source.append("  }\n\n");
+		source.append("  @Override\n");
+		source.append("  public List<Class<? extends com.activeandroid.serializer.TypeSerializer>> getTypeSerializers() {\n");
+		appendClassList(source, serializers);
+		source.append("  }\n");
+		source.append("}\n");
+
+		try {
+			JavaFileObject file = processingEnv.getFiler().createSourceFile(qualifiedName, origins.toArray(new Element[0]));
+			Writer writer = file.openWriter();
+			try {
+				writer.write(source.toString());
+			} finally {
+				writer.close();
+			}
+		} catch (IOException exception) {
+			processingEnv.getMessager().printMessage(Kind.ERROR,
+					"Couldn't write " + qualifiedName + ": " + exception.getMessage());
+			return;
+		}
+		registered.addAll(models.keySet());
+		registered.addAll(serializers.keySet());
+		registryNames.add(qualifiedName);
+		registryOrigins.addAll(origins);
+	}
+
+	/** Writes the {@code META-INF/services} entry, once, in the last round. */
+	private void writeRegistryServices() {
+		if (registryNames.isEmpty())
+			return;
+		String resource = "META-INF/services/" + ModelRegistry.class.getName();
+		try {
+			FileObject services = processingEnv.getFiler().createResource(StandardLocation.CLASS_OUTPUT, "",
+					resource, registryOrigins.toArray(new Element[0]));
+			Writer writer = services.openWriter();
+			try {
+				for (String name : registryNames)
+					writer.write(name + "\n");
+			} finally {
+				writer.close();
+			}
+		} catch (IOException exception) {
+			processingEnv.getMessager().printMessage(Kind.ERROR,
+					"Couldn't write " + resource + ": " + exception.getMessage());
+		}
+	}
+
+	private static void appendClassList(StringBuilder source, Map<String, String> classes) {
+		source.append("    List classes = new ArrayList();\n");
+		for (Map.Entry<String, String> entry : classes.entrySet()) {
+			String binaryName = entry.getValue();
+			if (binaryName == null) {
+				source.append("    classes.add(").append(entry.getKey()).append(".class);\n");
+				continue;
+			}
+			String literal = "\"" + binaryName + "\"";
+			source.append("    try {\n");
+			source.append("      classes.add(Class.forName(").append(literal).append("));\n");
+			source.append("    } catch (ClassNotFoundException e) {\n");
+			source.append("      throw new NoClassDefFoundError(").append(literal).append(");\n");
+			source.append("    }\n");
+		}
+		source.append("    return classes;\n");
+	}
+
+	/** 128 bits of SHA-256 over the class names, so registries in the shared package don't collide. */
+	private static String contentHash(Set<String> models, Set<String> serializers) {
+		StringBuilder content = new StringBuilder();
+		for (String name : models)
+			content.append("M ").append(name).append('\n');
+		for (String name : serializers)
+			content.append("S ").append(name).append('\n');
+		try {
+			byte[] digest = MessageDigest.getInstance("SHA-256").digest(content.toString().getBytes(Charset.forName("UTF-8")));
+			StringBuilder hex = new StringBuilder();
+			for (int i = 0; i < 16; i++)
+				hex.append(String.format("%02x", digest[i] & 0xff));
+			return hex.toString();
+		} catch (NoSuchAlgorithmException exception) {
+			// Every Java platform has SHA-256
+			throw new IllegalStateException(exception);
+		}
+	}
+
+	private TypeMirror erasure(Class<?> type) {
+		return processingEnv.getTypeUtils().erasure(
+				processingEnv.getElementUtils().getTypeElement(type.getCanonicalName()).asType());
+	}
+
+	/** This round's root types and all nested types. */
+	private List<TypeElement> allTypes() {
+		List<TypeElement> types = new ArrayList<TypeElement>();
+		for (Element root : env.getRootElements())
+			collectTypes(root, types);
+		return types;
+	}
+
+	private static void collectTypes(Element element, List<TypeElement> into) {
+		if (!(element instanceof TypeElement))
+			return;
+		into.add((TypeElement) element);
+		for (Element enclosed : element.getEnclosedElements())
+			collectTypes(enclosed, into);
+	}
+
+	/** Public and static all the way up, so a class literal can name it. */
+	private static boolean isReachable(TypeElement type) {
+		Element current = type;
+		while (current instanceof TypeElement) {
+			if (!current.getModifiers().contains(Modifier.PUBLIC))
+				return false;
+			Element enclosing = current.getEnclosingElement();
+			if (enclosing instanceof TypeElement && !current.getModifiers().contains(Modifier.STATIC))
+				return false;
+			current = enclosing;
+		}
+		return true;
+	}
+
+	// endregion
 
 	private void error(String message, Element element) {
 		processingEnv.getMessager().printMessage(Kind.ERROR, message, element);

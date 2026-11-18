@@ -23,19 +23,25 @@ import java.net.URL;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.ServiceConfigurationError;
+import java.util.ServiceLoader;
 
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 
+import com.activeandroid.serializer.BigDecimalSerializer;
 import com.activeandroid.serializer.CalendarSerializer;
 import com.activeandroid.serializer.FileSerializer;
 import com.activeandroid.serializer.SqlDateSerializer;
 import com.activeandroid.serializer.TypeSerializer;
+import com.activeandroid.serializer.UUIDSerializer;
 import com.activeandroid.serializer.UtilDateSerializer;
 import com.activeandroid.util.Log;
 import com.activeandroid.util.ReflectionUtils;
@@ -60,6 +66,9 @@ final class ModelInfo {
 			put(java.sql.Date.class, new SqlDateSerializer());
 			put(java.util.Date.class, new UtilDateSerializer());
 			put(java.io.File.class, new FileSerializer());
+			// Found by the dex scan before, but not listed in any registry
+			put(java.math.BigDecimal.class, new BigDecimalSerializer());
+			put(java.util.UUID.class, new UUIDSerializer());
 		}
 	};
 
@@ -68,7 +77,8 @@ final class ModelInfo {
 	//////////////////////////////////////////////////////////////////////////////////////
 
 	public ModelInfo(Configuration configuration) {
-		if (!loadModelFromMetaData(configuration)) {
+		if (!loadModelFromMetaData(configuration)
+				&& !(configuration.isModelRegistryEnabled() && loadModelFromRegistries(configuration))) {
 			try {
 				scanForModel(configuration.getContext());
 			}
@@ -112,23 +122,90 @@ final class ModelInfo {
 			}
 		}
 
-		final List<Class<? extends TypeSerializer>> typeSerializers = configuration.getTypeSerializers();
-		if (typeSerializers != null) {
-			for (Class<? extends TypeSerializer> typeSerializer : typeSerializers) {
-				try {
-					TypeSerializer instance = typeSerializer.newInstance();
-					mTypeSerializers.put(instance.getDeserializedType(), instance);
-				}
-				catch (InstantiationException e) {
-					Log.e("Couldn't instantiate TypeSerializer.", e);
-				}
-				catch (IllegalAccessException e) {
-					Log.e("IllegalAccessException", e);
-				}
-			}
-		}
+		addTypeSerializers(configuration.getTypeSerializers(), mTypeSerializers, null);
 
 		return true;
+	}
+
+	/**
+	 * Loads models and serializers from every {@link ModelRegistry}. Uses the two-argument
+	 * {@code ServiceLoader.load} so R8 can optimize it. All or nothing: any failure keeps nothing.
+	 *
+	 * @return false if no registry is found or one fails, so the caller falls back to the scan
+	 */
+	private boolean loadModelFromRegistries(Configuration configuration) {
+		final Map<Class<? extends Model>, TableInfo> tableInfos = new HashMap<Class<? extends Model>, TableInfo>();
+		final Map<Class<?>, TypeSerializer> typeSerializers = new HashMap<Class<?>, TypeSerializer>(mTypeSerializers);
+		try {
+			final List<ModelRegistry> registries = new ArrayList<ModelRegistry>();
+			for (ModelRegistry registry : ServiceLoader.load(ModelRegistry.class, ModelRegistry.class.getClassLoader()))
+				registries.add(registry);
+			if (registries.isEmpty()) {
+				Log.w("AA_MODEL_REGISTRY is set but no ModelRegistry was found: scanning the dex for models instead.");
+				return false;
+			}
+			// Sort for a stable winner when two registries serialize the same type
+			Collections.sort(registries, new Comparator<ModelRegistry>() {
+				@Override
+				public int compare(ModelRegistry left, ModelRegistry right) {
+					return left.getClass().getName().compareTo(right.getClass().getName());
+				}
+			});
+
+			final Map<Class<?>, Class<?>> registered = new HashMap<Class<?>, Class<?>>();
+			for (ModelRegistry registry : registries) {
+				for (Class<? extends Model> model : registry.getModelClasses()) {
+					if (!tableInfos.containsKey(model))
+						tableInfos.put(model, new TableInfo(model));
+				}
+				addTypeSerializers(registry.getTypeSerializers(), typeSerializers, registered);
+			}
+		}
+		catch (ServiceConfigurationError e) {
+			Log.e("Couldn't load a ModelRegistry: scanning the dex for models instead.", e);
+			return false;
+		}
+		catch (LinkageError e) {
+			Log.e("A ModelRegistry names a class that couldn't be loaded: scanning the dex for models instead.", e);
+			return false;
+		}
+
+		// AA_SERIALIZERS last, so it overrides the registries
+		addTypeSerializers(configuration.getTypeSerializers(), typeSerializers, null);
+
+		mTableInfos.putAll(tableInfos);
+		mTypeSerializers.putAll(typeSerializers);
+		return true;
+	}
+
+	/**
+	 * Instantiates each serializer into {@code into} by type; later ones win.
+	 *
+	 * @param registered if not null, tracks classes per type to log conflicting serializers
+	 */
+	private static void addTypeSerializers(List<Class<? extends TypeSerializer>> typeSerializers,
+			Map<Class<?>, TypeSerializer> into, Map<Class<?>, Class<?>> registered) {
+		if (typeSerializers == null)
+			return;
+		for (Class<? extends TypeSerializer> typeSerializer : typeSerializers) {
+			try {
+				TypeSerializer instance = typeSerializer.newInstance();
+				Class<?> type = instance.getDeserializedType();
+				if (registered != null) {
+					Class<?> previous = registered.put(type, typeSerializer);
+					if (previous != null && previous != typeSerializer)
+						Log.w("Both " + previous.getName() + " and " + typeSerializer.getName() + " serialize "
+								+ type.getName() + "; using " + typeSerializer.getName());
+				}
+				into.put(type, instance);
+			}
+			catch (InstantiationException e) {
+				Log.e("Couldn't instantiate TypeSerializer.", e);
+			}
+			catch (IllegalAccessException e) {
+				Log.e("IllegalAccessException", e);
+			}
+		}
 	}
 
 	private void scanForModel(Context context) throws IOException {

@@ -42,6 +42,7 @@ public class Configuration {
 	private List<Class<? extends Model>> mModelClasses;
 	private List<Class<? extends TypeSerializer>> mTypeSerializers;
 	private int mCacheSize;
+	private boolean mModelRegistryEnabled;
 
 	//////////////////////////////////////////////////////////////////////////////////////
 	// CONSTRUCTORS
@@ -83,6 +84,11 @@ public class Configuration {
 		return mCacheSize;
 	}
 
+	/** See {@link Builder#setModelRegistryEnabled}. */
+	public boolean isModelRegistryEnabled() {
+		return mModelRegistryEnabled;
+	}
+
 	public boolean isValid() {
 		return mModelClasses != null && mModelClasses.size() > 0;
 	}
@@ -101,6 +107,7 @@ public class Configuration {
 		private final static String AA_MODELS = "AA_MODELS";
 		private final static String AA_SERIALIZERS = "AA_SERIALIZERS";
 		private final static String AA_SQL_PARSER = "AA_SQL_PARSER";
+		private final static String AA_MODEL_REGISTRY = "AA_MODEL_REGISTRY";
 
 		private static final int DEFAULT_CACHE_SIZE = 1024;
 		private static final String DEFAULT_DB_NAME = "Application.db";
@@ -118,6 +125,7 @@ public class Configuration {
 		private String mSqlParser;
 		private List<Class<? extends Model>> mModelClasses;
 		private List<Class<? extends TypeSerializer>> mTypeSerializers;
+		private Boolean mModelRegistryEnabled;
 
 		//////////////////////////////////////////////////////////////////////////////////////
 		// CONSTRUCTORS
@@ -198,6 +206,17 @@ public class Configuration {
 			return this;
 		}
 
+		/**
+		 * Finds models and serializers through the generated {@link ModelRegistry} classes instead
+		 * of scanning the dex. Enable only if every module with models runs the annotation
+		 * processor; models elsewhere are not found. Falls back to the scan if no registry can be
+		 * read. Off by default; also set by the {@code AA_MODEL_REGISTRY} meta-data.
+		 */
+		public Builder setModelRegistryEnabled(boolean enabled) {
+			mModelRegistryEnabled = enabled;
+			return this;
+		}
+
 		public Configuration create() {
 			Configuration configuration = new Configuration(mContext);
 			configuration.mCacheSize = mCacheSize;
@@ -243,6 +262,12 @@ public class Configuration {
 				}
 			}
 
+			if (mModelRegistryEnabled != null) {
+				configuration.mModelRegistryEnabled = mModelRegistryEnabled;
+			} else {
+				configuration.mModelRegistryEnabled = getMetaDataModelRegistryEnabled();
+			}
+
 			return configuration;
 		}
 
@@ -276,6 +301,12 @@ public class Configuration {
 		        return DEFAULT_SQL_PARSER;
 		    }
 		    return mode;
+		}
+
+		private boolean getMetaDataModelRegistryEnabled() {
+			// Boolean for android:value="true", String for a string resource
+			final Object value = ReflectionUtils.getMetaData(mContext, AA_MODEL_REGISTRY);
+			return value instanceof Boolean ? (Boolean) value : value != null && Boolean.parseBoolean(value.toString());
 		}
 
 		private List<Class<? extends Model>> loadModelList(String[] models) {
